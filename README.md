@@ -37,7 +37,7 @@ ca/rs/out/
 ## Start the server
 
 ```sh
-cargo run -- server \
+RUST_LOG=info cargo run -- server \
     --tls-certificate-chain "$(pwd)/ca/rs/out/rs-server-chain.pem" \
     --tls-key "$(pwd)/ca/rs/out/rs-server-key.pem"
 ```
@@ -45,7 +45,7 @@ cargo run -- server \
 ## Start the client
 
 ```sh
-cargo run -- client \
+RUST_LOG=info cargo run -- client \
     --tls-ca-certificate "$(pwd)/ca/rs/out/rs-trust-chain.pem" \
     --tls-certificate "$(pwd)/ca/rs/out/rs-client.pem" \
     --tls-key "$(pwd)/ca/rs/out/rs-client-key.pem"
