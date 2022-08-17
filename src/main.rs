@@ -1,14 +1,14 @@
 use clap::{Parser, Subcommand};
+use log::{error, info, warn};
+use tokio::signal;
 
 mod tls;
-
-use tokio::signal;
 
 /// Simple TLS echo server/client
 #[derive(Parser, Debug)]
 #[clap(author = "Radek Gruchalski", version, about, long_about = None)]
 #[clap(propagate_version = true)]
-struct Args {
+struct AppArgs {
    #[clap(subcommand)]
    command: Option<Commands>,
 }
@@ -17,47 +17,57 @@ struct Args {
 enum Commands {
    /// Starts a client
    Client {
-      #[clap(long, value_parser, default_value = "localhost")]
+      #[clap(long, env="HOST", default_value_t = String::from("localhost"))]
       host: String,
-      #[clap(long, value_parser, default_value_t = 5002)]
+      #[clap(long, value_parser = clap::value_parser!(u16).range(1024..), env="PORT", default_value_t = 5002)]
       port: u16,
-      #[clap(long, value_parser)]
+      #[clap(long, value_name = "FILE", env="TLS_CA_CERTIFICATE")]
       tls_ca_certificate: String,
-      #[clap(long, value_parser)]
+      #[clap(long, value_name = "FILE", env = "TLS_CERTIFICATE")]
       tls_certificate: String,
-      #[clap(long, value_parser)]
+      #[clap(long, value_name = "FILE", env="TLS_KEY")]
       tls_key: String,
    },
    /// Starts a server
    Server {
-      #[clap(long, value_parser, default_value = "127.0.0.1:5002")]
+      #[clap(long, value_name = "HOST:PORT", env="BIND_ADDRESS", default_value_t = String::from("127.0.0.1:5002"))]
       bind_address: String,
-      #[clap(long, value_parser)]
+      #[clap(long, value_name = "FILE", env="TLS_CERTIFICATE_CHAIN")]
       tls_certificate_chain: String,
-      #[clap(long, value_parser)]
+      #[clap(long, value_name = "FILE", env="TLS_KEY")]
       tls_key: String,
    },
 }
 
 #[tokio::main]
 async fn main() {
-   let args = Args::parse();
+
+   env_logger::init();
+
+   let args = AppArgs::parse();
+
    match &args.command {
       Some(Commands::Client { host, port, tls_ca_certificate, tls_certificate, tls_key }) => {
          let msg = b"Hello world\n";
          let mut buf = [0; 12];
-         tls::client::start_client(&host, *port, &tls_ca_certificate, &tls_certificate, &tls_key, msg, &mut buf).await;
-         match std::str::from_utf8(&buf) {
-            Ok(v) => {
-               println!("Client received: {}", v)
-            },
-            Err(e) => {
-               panic!("Invalid UTF-8 sequence: {}", e)
-            },
-        };
+         
+         match tls::client::start_client(&host, *port, &tls_ca_certificate, &tls_certificate, &tls_key, msg, &mut buf).await {
+            Some(_) => {
+               match std::str::from_utf8(&buf) {
+                  Ok(v) => {
+                     info!("client fully echoed: {}", v)
+                  },
+                  Err(e) => {
+                     error!("Invalid UTF-8 sequence: {}", e)
+                  },
+               };
+            }
+            None => {}
+         };
+         
       }
       Some(Commands::Server { bind_address, tls_certificate_chain, tls_key }) => {
-         println!("Starting the server...");
+         info!("starting the server");
          tls::server::start_server(&bind_address, &tls_certificate_chain, &tls_key).await;
          match signal::ctrl_c().await {
             Ok(()) => {},
@@ -66,9 +76,9 @@ async fn main() {
                 // we also shut down in case of error
             },
          }
-         println!("Server finished");
+         info!("server finished, stopping");
       }
       None =>
-         println!("No command given")
+         warn!("no command, nothing to do")
    }
 }
