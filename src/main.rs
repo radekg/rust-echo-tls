@@ -52,7 +52,7 @@ async fn main() {
          let mut buf = [0; 12];
          
          match tls::client::start_client(&host, *port, &tls_ca_certificate, &tls_certificate, &tls_key, msg, &mut buf).await {
-            Some(_) => {
+            Ok(_) => {
                match std::str::from_utf8(&buf) {
                   Ok(v) => {
                      info!("client fully echoed: {}", v)
@@ -62,21 +62,29 @@ async fn main() {
                   },
                };
             }
-            None => {}
+            Err(reason) => {
+               error!("client failed, reason: {:?}", reason)
+            }
          };
          
       }
       Some(Commands::Server { bind_address, tls_certificate_chain, tls_key }) => {
          info!("starting the server");
-         tls::server::start_server(&bind_address, &tls_certificate_chain, &tls_key).await;
-         match signal::ctrl_c().await {
-            Ok(()) => {},
-            Err(err) => {
-                eprintln!("Unable to listen for shutdown signal: {}", err);
-                // we also shut down in case of error
+         match tls::server::start_server(&bind_address, &tls_certificate_chain, &tls_key).await {
+            Ok(_) => {
+               match signal::ctrl_c().await {
+                  Ok(()) => {},
+                  Err(err) => {
+                      eprintln!("Unable to listen for shutdown signal: {}", err);
+                      // we also shut down in case of error
+                  },
+               }
+               info!("server finished, stopping")
             },
-         }
-         info!("server finished, stopping");
+            Err(reason) => {
+               error!("server failed, reason: {:?}", reason)
+            },
+         };
       }
       None =>
          warn!("no command, nothing to do")

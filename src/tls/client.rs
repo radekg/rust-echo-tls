@@ -1,9 +1,6 @@
 use std::sync::Arc;
-use crate::tls;
-
 use log::{info, error};
 
-use std::io;
 use std::net::{
     SocketAddr,
     ToSocketAddrs,
@@ -18,131 +15,107 @@ use tokio_rustls::{
     client::TlsStream as ClientTlsStream,
 };
 
-pub fn make_client_config(ca_file: &str, certs_file: &str, key_file: &str) -> Option<Arc<rustls::ClientConfig>> {
+use crate::tls;
+
+#[derive(Debug)]
+pub enum ClientError {
+    AddressLookupError(std::io::Error),
+    ConnectError(tokio::io::Error),
+    NoAddressesAvailable,
+    ReadFailedError(std::io::Error),
+    WriteFailedError(std::io::Error),
+    TlsError(tls::utils::TlsError),
+    TlsCipherSuitesError(rustls::Error),
+    TlsClientCertError(rustls::Error),
+    TlsDomainNameError(rustls::client::InvalidDnsNameError),
+}
+
+impl std::fmt::Display for ClientError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AddressLookupError(e) =>
+                write!(f, "failed looking up the address: {:?}", e),
+            Self::ConnectError(e) =>
+                write!(f, "TCP stream not connected: {:?}", e),
+            Self::NoAddressesAvailable =>
+                write!(f, "no addresses available while looking up"),
+            Self::ReadFailedError(e) =>
+                write!(f, "read failed: {:?}", e),
+            Self::WriteFailedError(e) =>
+                write!(f, "write failed: {:?}", e),
+            Self::TlsError(e) =>
+                write!(f, "TLS error: {:?}", e),
+            Self::TlsCipherSuitesError(e) =>
+                write!(f, "inconsistent cipher-suite/versions selected: {:?}", e),
+            Self::TlsClientCertError(e) =>
+                write!(f, "invalid client auth certs/key: {:?}", e),
+            Self::TlsDomainNameError(e) =>
+                write!(f, "invalid DNS name: {:?}", e),
+        }
+    }
+}
+
+fn make_client_config(ca_file: &str, certs_file: &str, key_file: &str) -> Result<Arc<rustls::ClientConfig>, ClientError> {
     let suites = rustls::DEFAULT_CIPHER_SUITES.to_vec();
     let versions = rustls::DEFAULT_VERSIONS.to_vec();
-    match tls::utils::load_root_store(ca_file) {
-        None => { None }
-        Some(root_store) => {
-            match tls::utils::load_certs(certs_file) {
-                None => { None }
-                Some(cert_chain) => {
-                    match tls::utils::load_private_key(key_file) {
-                        None => { None }
-                        Some(key_der) => {
-                            match rustls::ClientConfig::builder()
-                                .with_cipher_suites(&suites)
-                                .with_safe_default_kx_groups()
-                                .with_protocol_versions(&versions) {
-                                Ok(builder) => {
-                                    match builder.with_root_certificates(root_store)
-                                        .with_single_cert(cert_chain, key_der) {
-                                        Ok(config) => {
-                                            Some(Arc::new(config))
-                                        }
-                                        Err(e) => {
-                                            error!("invalid client auth certs/key: {:?}", e);
-                                            None
-                                        }
-                                    }
-                                }
-                                Err(e) => {
-                                    error!("inconsistent cipher-suite/versions selected: {:?}", e);
-                                    None
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
+    let root_store = tls::utils::load_root_store(ca_file).map_err(|e| ClientError::TlsError(e))?;
+    let cert_chain = tls::utils::load_certs(certs_file).map_err(|e| ClientError::TlsError(e))?;
+    let key_der = tls::utils::load_private_key(key_file).map_err(|e| ClientError::TlsError(e))?;
+    let config = rustls::ClientConfig::builder()
+        .with_cipher_suites(&suites)
+        .with_safe_default_kx_groups()
+        .with_protocol_versions(&versions).map_err(|e| ClientError::TlsCipherSuitesError(e))?
+        .with_root_certificates(root_store)
+        .with_single_cert(cert_chain, key_der).map_err(|e| ClientError::TlsClientCertError(e))?;
+    Ok(Arc::new(config))
 }
 
-pub async fn new_tls_stream(domain: &str, addr: std::net::SocketAddr, 
-    ca_file: &str, cert_file: &str, key_file: &str) -> Option<ClientTlsStream<TcpStream>> {
-    match make_client_config(&ca_file, &cert_file, &key_file) {
-        None => { None }
-        Some(config) => {
-            let connector = TlsConnector::from(config);
-            match TcpStream::connect(&addr).await {
-                Ok(stream) => {
-                    match rustls::ServerName::try_from(domain)
-                        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "invalid dnsname")) {
-                        Ok(domain) => {
-                            match connector.connect(domain, stream).await {
-                                Ok(connected_stream) => {
-                                    info!("stream connected");
-                                    Some(connected_stream)
-                                }
-                                Err(e) => {
-                                    error!("stream not connected: {:?}", e);
-                                    None
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            error!("server name not resolved: {:?}", e);
-                            None
-                        }
-                    }
-                }
-                Err(e) => {
-                    error!("TCP stream not connected: {:?}", e);
-                    None
-                }
-            }
-        }
-    }
+async fn new_tls_stream(domain: &str, addr: std::net::SocketAddr, 
+    ca_file: &str, cert_file: &str, key_file: &str) -> Result<ClientTlsStream<TcpStream>, ClientError> {
+    let config = make_client_config(&ca_file, &cert_file, &key_file)?;
+    let connector = TlsConnector::from(config);
+    let stream = TcpStream::connect(&addr).await.map_err(|e| ClientError::ConnectError(e))?;
+    let server_name = rustls::ServerName::try_from(domain)
+        .map_err(|e| ClientError::TlsDomainNameError(e))?;
+    let connected_stream = connector.connect(server_name, stream).await.map_err(|e| ClientError::ConnectError(e))?;
+    Ok(connected_stream)
 }
 
-pub fn lookup_ipv4(host: &str, port: u16) -> Option<SocketAddr> {
+fn lookup_ipv4(host: &str, port: u16) -> Result<SocketAddr, ClientError> {
     match (host, port).to_socket_addrs() {
         Ok(addrs) => {
             for addr in addrs {
                 if let SocketAddr::V4(_) = addr {
-                    return Some(addr);
+                    return Ok(addr);
                 }
             }
-            None
+            Err(ClientError::NoAddressesAvailable)
         }
-        Err(e) => {
-            error!("failed looking up the address: {:?}", e);
-            None
-        }
+        Err(e) => Err(ClientError::AddressLookupError(e))
     }
 }
 
-pub async fn start_client(host: &str, port: u16, ca_file: &str, cert_file: &str, key_file: &str, msg: &[u8], buf: &mut [u8]) -> Option<()> {
-    match lookup_ipv4(host, port) {
-        None => { None }
-        Some(addr) => {
-            info!("client socket address is: {:?}", addr.clone());
-            match new_tls_stream(host, addr, ca_file, cert_file, key_file).await {
-                None => { None }
-                Some(mut tls_stream) => {
-                    match tls_stream.write(msg).await {
-                        Ok(_nwritten) => {
-                            info!("client: send data");
-                            match tls_stream.read(buf).await {
-                                Ok(_nread) => {
-                                    info!("client: read echoed data");
-                                    Some(())
-                                }
-                                Err(e) => {
-                                    error!("client failed reading echoed data: {:?}", e);
-                                    None
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            error!("client write data failed: {:?}", e);
-                            None
-                        }
-                    }
+pub async fn start_client(host: &str, port: u16, ca_file: &str, cert_file: &str, key_file: &str, msg: &[u8], buf: &mut [u8]) -> Result<(), ClientError> {
+    let addr = lookup_ipv4(host, port)?;
+    info!("client socket address is: {:?}", addr.clone());
+    let mut tls_stream = new_tls_stream(host, addr, ca_file, cert_file, key_file).await?;
+    match tls_stream.write(msg).await {
+        Ok(_nwritten) => {
+            info!("client: send data");
+            match tls_stream.read(buf).await {
+                Ok(_nread) => {
+                    info!("client: read echoed data");
+                    Ok(())
+                }
+                Err(e) => {
+                    error!("client failed reading echoed data: {:?}", e);
+                    Err(ClientError::ReadFailedError(e))
                 }
             }
+        },
+        Err(e) => {
+            error!("client write data failed: {:?}", e);
+            Err(ClientError::WriteFailedError(e))
         }
     }
 }
