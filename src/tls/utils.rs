@@ -16,22 +16,23 @@ pub enum TlsError {
 impl std::fmt::Display for TlsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::CaFileOpenError(e) =>
-                write!(f, "failed opening CA file: {:?}", e),
-            Self::CaDerParseError(e) =>
-                write!(f, "failed reading DER certs from CA file: {:?}", e),
-            Self::CertFileOpenError(e) =>
-                write!(f, "failed opening certificate file: {:?}", e),
-            Self::CertDerParseError(e) =>
-                write!(f, "failed reading DER certs from certificate file: {:?}", e),
-            Self::PrivateKeyEmptyError =>
-                write!(f, "no keys found in private key file (encrypted keys not supported)"),
-            Self::PrivateKeyFileOpenError(e) =>
-                write!(f, "failed opening private key file: {:?}", e),
-            Self::PrivateKeyIoError(e) =>
-                write!(f, "failed reading private key file: {:?}", e),
-            Self::PrivateKeyUnsupportedError =>
-                write!(f, "unsupported key found in private key file"),
+            Self::CaFileOpenError(e) => write!(f, "failed opening CA file: {:?}", e),
+            Self::CaDerParseError(e) => write!(f, "failed reading DER certs from CA file: {:?}", e),
+            Self::CertFileOpenError(e) => write!(f, "failed opening certificate file: {:?}", e),
+            Self::CertDerParseError(e) => {
+                write!(f, "failed reading DER certs from certificate file: {:?}", e)
+            }
+            Self::PrivateKeyEmptyError => write!(
+                f,
+                "no keys found in private key file (encrypted keys not supported)"
+            ),
+            Self::PrivateKeyFileOpenError(e) => {
+                write!(f, "failed opening private key file: {:?}", e)
+            }
+            Self::PrivateKeyIoError(e) => write!(f, "failed reading private key file: {:?}", e),
+            Self::PrivateKeyUnsupportedError => {
+                write!(f, "unsupported key found in private key file")
+            }
         }
     }
 }
@@ -40,24 +41,27 @@ pub fn load_root_store(ca_file: &str) -> Result<rustls::RootCertStore, TlsError>
     let cert_file = File::open(&ca_file).map_err(|e| TlsError::CaFileOpenError(e))?;
     let mut reader = BufReader::new(cert_file);
     let mut root_store = rustls::RootCertStore::empty();
-    rustls_pemfile::certs(&mut reader).map_or_else(|e| {
-        Err(TlsError::CaDerParseError(e))
-    }, |der_certs| {
-        root_store.add_parsable_certificates(&der_certs);
-        Ok(root_store)
-    })
+    rustls_pemfile::certs(&mut reader).map_or_else(
+        |e| Err(TlsError::CaDerParseError(e)),
+        |der_certs| {
+            root_store.add_parsable_certificates(&der_certs);
+            Ok(root_store)
+        },
+    )
 }
 
 pub fn load_certs(filename: &str) -> Result<Vec<rustls::Certificate>, TlsError> {
     let cert_file = File::open(filename).map_err(|e| TlsError::CertFileOpenError(e))?;
     let mut reader = BufReader::new(cert_file);
-    rustls_pemfile::certs(&mut reader).map_or_else(|e| {
-        Err(TlsError::CertDerParseError(e))
-    }, |der_certs| {
-        Ok(der_certs.iter()
-            .map(|v| rustls::Certificate(v.clone()))
-            .collect())
-    })
+    rustls_pemfile::certs(&mut reader).map_or_else(
+        |e| Err(TlsError::CertDerParseError(e)),
+        |der_certs| {
+            Ok(der_certs
+                .iter()
+                .map(|v| rustls::Certificate(v.clone()))
+                .collect())
+        },
+    )
 }
 
 pub fn load_private_key(filename: &str) -> Result<rustls::PrivateKey, TlsError> {

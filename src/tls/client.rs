@@ -1,18 +1,15 @@
+use log::{error, info};
 use std::sync::Arc;
-use log::{info, error};
 
-use std::net::{
-    SocketAddr,
-    ToSocketAddrs,
-};
+use std::net::{SocketAddr, ToSocketAddrs};
 
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::io::{AsyncWriteExt, AsyncReadExt};
 
 use tokio_rustls::{
-    TlsConnector,
-    rustls::{self},
     client::TlsStream as ClientTlsStream,
+    rustls::{self},
+    TlsConnector,
 };
 
 use crate::tls;
@@ -33,29 +30,26 @@ pub enum ClientError {
 impl std::fmt::Display for ClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::AddressLookupError(e) =>
-                write!(f, "failed looking up the address: {:?}", e),
-            Self::ConnectError(e) =>
-                write!(f, "TCP stream not connected: {:?}", e),
-            Self::NoAddressesAvailable =>
-                write!(f, "no addresses available while looking up"),
-            Self::ReadFailedError(e) =>
-                write!(f, "read failed: {:?}", e),
-            Self::WriteFailedError(e) =>
-                write!(f, "write failed: {:?}", e),
-            Self::TlsError(e) =>
-                write!(f, "TLS error: {:?}", e),
-            Self::TlsCipherSuitesError(e) =>
-                write!(f, "inconsistent cipher-suite/versions selected: {:?}", e),
-            Self::TlsClientCertError(e) =>
-                write!(f, "invalid client auth certs/key: {:?}", e),
-            Self::TlsDomainNameError(e) =>
-                write!(f, "invalid DNS name: {:?}", e),
+            Self::AddressLookupError(e) => write!(f, "failed looking up the address: {:?}", e),
+            Self::ConnectError(e) => write!(f, "TCP stream not connected: {:?}", e),
+            Self::NoAddressesAvailable => write!(f, "no addresses available while looking up"),
+            Self::ReadFailedError(e) => write!(f, "read failed: {:?}", e),
+            Self::WriteFailedError(e) => write!(f, "write failed: {:?}", e),
+            Self::TlsError(e) => write!(f, "TLS error: {:?}", e),
+            Self::TlsCipherSuitesError(e) => {
+                write!(f, "inconsistent cipher-suite/versions selected: {:?}", e)
+            }
+            Self::TlsClientCertError(e) => write!(f, "invalid client auth certs/key: {:?}", e),
+            Self::TlsDomainNameError(e) => write!(f, "invalid DNS name: {:?}", e),
         }
     }
 }
 
-fn make_client_config(ca_file: &str, certs_file: &str, key_file: &str) -> Result<Arc<rustls::ClientConfig>, ClientError> {
+fn make_client_config(
+    ca_file: &str,
+    certs_file: &str,
+    key_file: &str,
+) -> Result<rustls::ClientConfig, ClientError> {
     let suites = rustls::DEFAULT_CIPHER_SUITES.to_vec();
     let versions = rustls::DEFAULT_VERSIONS.to_vec();
     let root_store = tls::utils::load_root_store(ca_file).map_err(|e| ClientError::TlsError(e))?;
@@ -64,20 +58,32 @@ fn make_client_config(ca_file: &str, certs_file: &str, key_file: &str) -> Result
     let config = rustls::ClientConfig::builder()
         .with_cipher_suites(&suites)
         .with_safe_default_kx_groups()
-        .with_protocol_versions(&versions).map_err(|e| ClientError::TlsCipherSuitesError(e))?
+        .with_protocol_versions(&versions)
+        .map_err(|e| ClientError::TlsCipherSuitesError(e))?
         .with_root_certificates(root_store)
-        .with_single_cert(cert_chain, key_der).map_err(|e| ClientError::TlsClientCertError(e))?;
-    Ok(Arc::new(config))
+        .with_single_cert(cert_chain, key_der)
+        .map_err(|e| ClientError::TlsClientCertError(e))?;
+    Ok(config)
 }
 
-async fn new_tls_stream(domain: &str, addr: std::net::SocketAddr, 
-    ca_file: &str, cert_file: &str, key_file: &str) -> Result<ClientTlsStream<TcpStream>, ClientError> {
+async fn new_tls_stream(
+    domain: &str,
+    addr: std::net::SocketAddr,
+    ca_file: &str,
+    cert_file: &str,
+    key_file: &str,
+) -> Result<ClientTlsStream<TcpStream>, ClientError> {
     let config = make_client_config(&ca_file, &cert_file, &key_file)?;
-    let connector = TlsConnector::from(config);
-    let stream = TcpStream::connect(&addr).await.map_err(|e| ClientError::ConnectError(e))?;
-    let server_name = rustls::ServerName::try_from(domain)
-        .map_err(|e| ClientError::TlsDomainNameError(e))?;
-    let connected_stream = connector.connect(server_name, stream).await.map_err(|e| ClientError::ConnectError(e))?;
+    let connector = TlsConnector::from(Arc::new(config));
+    let stream = TcpStream::connect(&addr)
+        .await
+        .map_err(|e| ClientError::ConnectError(e))?;
+    let server_name =
+        rustls::ServerName::try_from(domain).map_err(|e| ClientError::TlsDomainNameError(e))?;
+    let connected_stream = connector
+        .connect(server_name, stream)
+        .await
+        .map_err(|e| ClientError::ConnectError(e))?;
     Ok(connected_stream)
 }
 
@@ -91,11 +97,19 @@ fn lookup_ipv4(host: &str, port: u16) -> Result<SocketAddr, ClientError> {
             }
             Err(ClientError::NoAddressesAvailable)
         }
-        Err(e) => Err(ClientError::AddressLookupError(e))
+        Err(e) => Err(ClientError::AddressLookupError(e)),
     }
 }
 
-pub async fn start_client(host: &str, port: u16, ca_file: &str, cert_file: &str, key_file: &str, msg: &[u8], buf: &mut [u8]) -> Result<(), ClientError> {
+pub async fn start_client(
+    host: &str,
+    port: u16,
+    ca_file: &str,
+    cert_file: &str,
+    key_file: &str,
+    msg: &[u8],
+    buf: &mut [u8],
+) -> Result<(), ClientError> {
     let addr = lookup_ipv4(host, port)?;
     info!("client socket address is: {:?}", addr.clone());
     let mut tls_stream = new_tls_stream(host, addr, ca_file, cert_file, key_file).await?;
@@ -112,7 +126,7 @@ pub async fn start_client(host: &str, port: u16, ca_file: &str, cert_file: &str,
                     Err(ClientError::ReadFailedError(e))
                 }
             }
-        },
+        }
         Err(e) => {
             error!("client write data failed: {:?}", e);
             Err(ClientError::WriteFailedError(e))
